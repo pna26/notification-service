@@ -1,0 +1,87 @@
+# Notification no EKS: só consome o Kafka (sem Service, ninguém chama este pod).
+# Depende do kafka.yaml e do mailpit.yaml do repositório platform (k8s/).
+# O CI troca a imagem ":latest" pela tag do commit antes do kubectl apply.
+#
+# O Secret com usuário e senha do banco NÃO fica no Git. Crie uma vez por cluster
+# (mesmo usuário do account no RDS; o schema notification é criado pelo Flyway):
+#   kubectl create secret generic notification-secrets -n store \
+#     --from-literal=DATABASE_USERNAME=<usuario> \
+#     --from-literal=DATABASE_PASSWORD=<senha>
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notification-configmap
+data:
+  # endpoint do RDS PostgreSQL (rds-store). Para testar no Docker Desktop: postgres
+  DATABASE_HOST: rds-store.cb046mq0wslp.us-east-2.rds.amazonaws.com
+  DATABASE_PORT: "5432"
+  DATABASE_DB: store
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  MAIL_HOST: mailpit
+  NOTIFY_CONCURRENCY: "3"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification
+  labels:
+    app: notification
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification
+  template:
+    metadata:
+      labels:
+        app: notification
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: notification
+          image: 637423273088.dkr.ecr.us-east-2.amazonaws.com/notification-service:latest
+          # o CI sempre aplica uma tag nova (sha-xxxxxxx), então não precisa de Always
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: notification-configmap
+            - secretRef:
+                name: notification-secrets
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ "ALL" ]
+          volumeMounts:
+            # o Tomcat precisa de um /tmp gravável
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
